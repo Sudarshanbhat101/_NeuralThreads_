@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>DomScrap</title>
+    <style>
+      body {
+        width: 340px;
+        padding: 12px;
+        font-family: sans-serif;
+        font-size: 13px;
+      }
+      button {
+        width: 100%;
+        padding: 8px;
+        margin-bottom: 8px;
+        cursor: pointer;
+      }
+      #status {
+        margin: 8px 0;
+        color: #444;
+      }
+      #download {
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <button id="read">Read chat</button>
+    <button id="download">Download .md</button>
+    <div id="status">Open a Claude chat, then click "Read chat".</div>
+
+    <script src="popup.js"></script>
+  </body>
+</html>
