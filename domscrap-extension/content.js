@@ -568,6 +568,10 @@ async function readChat() {
   }
 
   const scroller = findScroller(first[0].el);
+  const scrollerDesc =
+    scroller.tagName.toLowerCase() +
+    (scroller.getAttribute("aria-label") ? '[aria-label="' + scroller.getAttribute("aria-label") + '"]' : "") +
+    " height=" + scroller.scrollHeight + " visible=" + scroller.clientHeight;
   weakLinks = 0;
 
   // start from the bottom so the newest messages are captured first
@@ -580,14 +584,17 @@ async function readChat() {
   let steps = 0;
   let stable = 0;
   let reachedTop = false;
+  let moved = 0;
   let lastHeight = scroller.scrollHeight;
   let lastCount = all.length;
 
   while (steps < 2500) {
     steps++;
     const step = Math.max(200, Math.floor(scroller.clientHeight * 0.5));
+    const before = scroller.scrollTop;
     scroller.scrollTop = Math.max(0, scroller.scrollTop - step);
     await sleep(300);
+    if (scroller.scrollTop !== before) moved++;
     all = addSnapshot(all);
 
     if (steps % 5 === 0) progress("Loading conversation... " + all.length + " messages found");
@@ -626,7 +633,7 @@ async function readChat() {
     "; userSelector=" + lastMethod.userSel + " (level " + lastMethod.userLevel + ")" +
     "; assistantSelector=" + lastMethod.assistantSel + " (level " + lastMethod.assistantLevel + ")" +
     "; messages=" + all.length + "; you=" + userCount + "; assistant=" + aiCount +
-    "; scrollSteps=" + steps + "; reachedTop=" + reachedTop +
+    "; scroller=" + scrollerDesc + "; stepsThatMoved=" + moved + "; scrollSteps=" + steps + "; reachedTop=" + reachedTop +
     "; weakLinks=" + weakLinks + "; emptyBlocks=" + emptyEls.size +
     "; attachmentNotes=" + attachCount;
 
