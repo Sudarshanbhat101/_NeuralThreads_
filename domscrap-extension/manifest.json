@@ -1,15 +1,25 @@
 {
   "manifest_version": 3,
   "name": "DomScrap",
-  "version": "0.1",
-  "description": "Reads a Claude chat and saves it as markdown.",
+  "version": "0.2",
+  "description": "Reads an AI chat (Claude, ChatGPT, Gemini) and saves it as markdown.",
   "action": {
     "default_popup": "popup.html"
   },
-  "host_permissions": ["https://claude.ai/*"],
+  "host_permissions": [
+    "https://claude.ai/*",
+    "https://chatgpt.com/*",
+    "https://chat.openai.com/*",
+    "https://gemini.google.com/*"
+  ],
   "content_scripts": [
     {
-      "matches": ["https://claude.ai/*"],
+      "matches": [
+        "https://claude.ai/*",
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*",
+        "https://gemini.google.com/*"
+      ],
       "js": ["selectors.js", "content.js"]
     }
   ]
