@@ -551,6 +551,50 @@ function selectorReport() {
   return lines.join(" | ");
 }
 
+// ---------- scrolling helpers ----------
+
+function nearestScrollable(el) {
+  for (let e = el && el.parentElement; e && e !== document.body; e = e.parentElement) {
+    const oy = getComputedStyle(e).overflowY;
+    if ((oy === "auto" || oy === "scroll") && e.scrollHeight > e.clientHeight + 20) return e;
+  }
+  return document.scrollingElement;
+}
+
+function describeEl(el) {
+  if (!el) return "none";
+  let s = el.tagName.toLowerCase();
+  const label = el.getAttribute && el.getAttribute("aria-label");
+  if (label) s += '[aria-label="' + label.slice(0, 30) + '"]';
+  return s + " (content " + el.scrollHeight + "px, visible " + el.clientHeight + "px)";
+}
+
+// Move the chat up by one step. Tries several methods because sites differ.
+async function scrollUpStep(scroller, topEl) {
+  const before = scroller.scrollTop;
+  const target = Math.max(0, before - Math.max(200, Math.floor(scroller.clientHeight * 0.5)));
+
+  scroller.scrollTop = target;
+  await sleep(300);
+  if (Math.abs(scroller.scrollTop - before) > 1) return { method: "scrollTop", moved: true };
+  if (before <= 1) return { method: "atTop", moved: false };
+
+  try { scroller.scrollTo({ top: target, behavior: "instant" }); } catch (e) {}
+  await sleep(250);
+  if (Math.abs(scroller.scrollTop - before) > 1) return { method: "scrollTo", moved: true };
+
+  if (topEl && topEl.isConnected) {
+    const r0 = topEl.getBoundingClientRect().top;
+    try { topEl.scrollIntoView({ block: "start", behavior: "instant" }); } catch (e) {}
+    await sleep(300);
+    const r1 = topEl.getBoundingClientRect().top;
+    if (Math.abs(r1 - r0) > 1 || Math.abs(scroller.scrollTop - before) > 1) {
+      return { method: "scrollIntoView", moved: true };
+    }
+  }
+  return { method: "none", moved: false };
+}
+
 // ---------- main ----------
 
 async function readChat() {
@@ -567,11 +611,8 @@ async function readChat() {
     return { error: "No messages matched. " + selectorReport() };
   }
 
-  const scroller = findScroller(first[0].el);
-  const scrollerDesc =
-    scroller.tagName.toLowerCase() +
-    (scroller.getAttribute("aria-label") ? '[aria-label="' + scroller.getAttribute("aria-label") + '"]' : "") +
-    " height=" + scroller.scrollHeight + " visible=" + scroller.clientHeight;
+  let scroller = findScroller(first[0].el);
+  const scrollerStart = describeEl(scroller);
   weakLinks = 0;
 
   // start from the bottom so the newest messages are captured first
@@ -583,34 +624,68 @@ async function readChat() {
 
   let steps = 0;
   let stable = 0;
+  let stuck = 0;
+  let switched = 0;
   let reachedTop = false;
-  let moved = 0;
+  const methods = {};
   let lastHeight = scroller.scrollHeight;
   let lastCount = all.length;
+  let lastTopKey = all.length ? all[0].key : "";
 
   while (steps < 2500) {
     steps++;
-    const step = Math.max(200, Math.floor(scroller.clientHeight * 0.5));
-    const before = scroller.scrollTop;
-    scroller.scrollTop = Math.max(0, scroller.scrollTop - step);
-    await sleep(300);
-    if (scroller.scrollTop !== before) moved++;
+
+    const items = collectElements();
+    const topEl = items.length ? items[0].el : null;
+
+    // the scroll area must contain the topmost message, or it is the wrong one
+    if (topEl && !scroller.contains(topEl)) {
+      const alt = nearestScrollable(topEl);
+      if (alt && alt !== scroller) {
+        scroller = alt;
+        switched++;
+        lastHeight = scroller.scrollHeight;
+      }
+    }
+
+    const r = await scrollUpStep(scroller, topEl);
+    methods[r.method] = (methods[r.method] || 0) + 1;
     all = addSnapshot(all);
 
     if (steps % 5 === 0) progress("Loading conversation... " + all.length + " messages found");
 
-    if (scroller.scrollTop <= 0) {
-      await sleep(1500); // let older messages load
+    if (scroller.scrollTop <= 1) {
+      // at the top: wait for older messages to load, then see if anything changed
+      stuck = 0;
+      await sleep(1500);
       all = addSnapshot(all);
       const h = scroller.scrollHeight;
-      if (h === lastHeight && all.length === lastCount) stable++;
+      const topKey = all.length ? all[0].key : "";
+      if (h === lastHeight && all.length === lastCount && topKey === lastTopKey) stable++;
       else stable = 0;
       lastHeight = h;
       lastCount = all.length;
-      if (stable >= 2) { reachedTop = true; break; }
+      lastTopKey = topKey;
+      if (stable >= 3) { reachedTop = true; break; }
+    } else if (!r.moved) {
+      // not at the top, but the scroll did not move: try another scroll area
+      stuck++;
+      if (stuck >= 3 && topEl) {
+        const alt = nearestScrollable(topEl);
+        if (alt && alt !== scroller) {
+          scroller = alt;
+          switched++;
+          stuck = 0;
+          lastHeight = scroller.scrollHeight;
+        }
+      }
+      if (stuck >= 10) break; // stuck for good: reachedTop stays false
+    } else {
+      stuck = 0;
     }
   }
 
+  const scrollerEnd = describeEl(scroller);
   scroller.scrollTop = scroller.scrollHeight; // put the user back at the bottom
 
   const warnings = runSanity(all, reachedTop);
@@ -618,7 +693,7 @@ async function readChat() {
   let title = document.title || "";
   try {
     if (SITE.titleCleanup) title = title.replace(new RegExp(SITE.titleCleanup, "i"), "");
-  } catch (e) { }
+  } catch (e) {}
   title = title.trim() || SITE.defaultTitle || "AI chat";
 
   const userCount = all.filter((m) => m.role === "user").length;
@@ -633,7 +708,9 @@ async function readChat() {
     "; userSelector=" + lastMethod.userSel + " (level " + lastMethod.userLevel + ")" +
     "; assistantSelector=" + lastMethod.assistantSel + " (level " + lastMethod.assistantLevel + ")" +
     "; messages=" + all.length + "; you=" + userCount + "; assistant=" + aiCount +
-    "; scroller=" + scrollerDesc + "; stepsThatMoved=" + moved + "; scrollSteps=" + steps + "; reachedTop=" + reachedTop +
+    "; scrollSteps=" + steps + "; reachedTop=" + reachedTop +
+    "; scrollMethods=" + JSON.stringify(methods) + "; scrollerSwitches=" + switched +
+    "; scrollerStart=" + scrollerStart + "; scrollerEnd=" + scrollerEnd +
     "; weakLinks=" + weakLinks + "; emptyBlocks=" + emptyEls.size +
     "; attachmentNotes=" + attachCount;
 
