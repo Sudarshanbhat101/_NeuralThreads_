@@ -429,43 +429,70 @@ function runSanity(all, reachedTop) {
 
 function selectorReport() {
   const lines = [];
+  const norm = (v) =>
+    String(v)
+      .replace(/[0-9a-f]{8}-[0-9a-f-]{20,}/gi, "UUID")
+      .replace(/\d+/g, "N")
+      .slice(0, 60);
+
   lines.push("site: " + SITE_NAME + " (" + location.hostname + ")");
+  lines.push("path: " + location.pathname.replace(/[0-9a-f]{8}-[0-9a-f-]{20,}/gi, "UUID"));
+
   for (const key of ["userMessage", "assistantMessage"]) {
     SELECTORS[key].forEach((s) => {
       let n = "invalid";
-      try { n = document.querySelectorAll(s).length; } catch (e) { }
+      try { n = document.querySelectorAll(s).length; } catch (e) {}
       lines.push(key + " " + s + " -> " + n);
     });
   }
 
-  // attribute values that repeat on the page: likely message markers
-  const attrs = ["data-testid", "data-message-author-role", "role", "data-is-streaming"];
+  // attribute values on the page, with numbers/ids folded together so that
+  // unique values (like turn numbers) still show up. No filter on count.
+  const attrs = [
+    "data-testid", "data-message-author-role", "data-message-id",
+    "data-turn", "data-turn-id", "role", "aria-label",
+  ];
   attrs.forEach((attr) => {
     const counts = {};
     document.querySelectorAll("[" + attr + "]").forEach((e) => {
-      const v = e.getAttribute(attr);
+      const v = norm(e.getAttribute(attr));
       counts[v] = (counts[v] || 0) + 1;
     });
     const top = Object.entries(counts)
-      .filter(([, n]) => n >= 2)
       .sort((a, b) => b[1] - a[1])
-      .slice(0, 8)
+      .slice(0, 12)
       .map(([v, n]) => v + " x" + n);
-    if (top.length) lines.push("repeated " + attr + ": " + top.join(", "));
+    if (top.length) lines.push(attr + ": " + top.join(", "));
   });
 
-  // custom page tags that repeat (for example <user-query> style elements)
+  // structural tags
   const tagCounts = {};
+  document.querySelectorAll("article, section, main, nav, aside, li").forEach((e) => {
+    const t = e.tagName.toLowerCase();
+    tagCounts[t] = (tagCounts[t] || 0) + 1;
+  });
+  lines.push("structural tags: " + (Object.entries(tagCounts).map(([t, n]) => t + " x" + n).join(", ") || "none"));
+
+  // custom tags (names with a dash)
+  const custom = {};
   document.querySelectorAll("*").forEach((e) => {
     const t = e.tagName.toLowerCase();
-    if (t.includes("-")) tagCounts[t] = (tagCounts[t] || 0) + 1;
+    if (t.includes("-")) custom[t] = (custom[t] || 0) + 1;
   });
-  const tags = Object.entries(tagCounts)
-    .filter(([, n]) => n >= 2)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 10)
+  const customTop = Object.entries(custom).sort((a, b) => b[1] - a[1]).slice(0, 10)
     .map(([t, n]) => t + " x" + n);
-  if (tags.length) lines.push("repeated custom tags: " + tags.join(", "));
+  if (customTop.length) lines.push("custom tags: " + customTop.join(", "));
+
+  // opening tags only (attributes, no text) of the first few <article>
+  // elements and of any element carrying an author-role marker
+  const samples = [];
+  const grab = (el) => {
+    const html = el.cloneNode(false).outerHTML;
+    samples.push(html.slice(0, html.indexOf(">") + 1).slice(0, 240));
+  };
+  Array.from(document.querySelectorAll("article")).slice(0, 3).forEach(grab);
+  Array.from(document.querySelectorAll("[data-message-author-role]")).slice(0, 2).forEach(grab);
+  if (samples.length) lines.push("sample tags: " + samples.join(" ## "));
 
   lines.push("backup method: " + (CFG_HEUR.enabled ? "tried, found nothing" : "disabled"));
   return lines.join(" | ");
