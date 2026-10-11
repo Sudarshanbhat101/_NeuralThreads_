@@ -1,43 +1,138 @@
-// Runs inside the claude.ai page. Uses SELECTORS from selectors.js.
+// Runs inside the AI chat page. Uses SITE, SELECTORS, NOISE, HEURISTIC and
+// SANITY from selectors.js (loaded first by the manifest).
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function progress(text) {
   try {
-    chrome.runtime.sendMessage({ type: "PROGRESS", text }).catch(() => {});
-  } catch (e) {}
+    chrome.runtime.sendMessage({ type: "PROGRESS", text }).catch(() => { });
+  } catch (e) { }
 }
+
+// ---------- settings (safe defaults if selectors.js is older) ----------
+
+const SITE_NAME = typeof SITE !== "undefined" && SITE.name ? SITE.name : "the AI";
+const CFG_NOISE = typeof NOISE !== "undefined" ? NOISE : { exact: [], patterns: [] };
+const CFG_SANITY =
+  typeof SANITY !== "undefined"
+    ? SANITY
+    : { minMessages: 1, maxRoleDifference: 2, requireReachedTop: true };
+const CFG_HEUR =
+  typeof HEURISTIC !== "undefined"
+    ? HEURISTIC
+    : { enabled: true, minBlocks: 2, minTextLength: 1 };
+
+const NOISE_EXACT = new Set(CFG_NOISE.exact || []);
+const NOISE_PATTERNS = (CFG_NOISE.patterns || [])
+  .map((p) => { try { return new RegExp(p, "i"); } catch (e) { return null; } })
+  .filter(Boolean);
+
+// Attachment detection. The tile selectors are GUESSES: if documents are not
+// noted in a capture, send me the debug text and we adjust this list.
+const ATTACH = {
+  tileSelectors: [
+    '[data-testid*="file"]',
+    '[data-testid*="attachment"]',
+    '[data-testid*="document"]',
+    '[data-testid*="thumbnail"]',
+  ],
+  minImageSize: 40, // smaller images (icons, emoji, favicons) are ignored
+};
+const IMG_EXT = /\.(png|jpe?g|gif|webp|bmp|svg|heic|avif)$/i;
+
+// Heading labels that sites add to every reply for screen readers.
+const LABEL_HEADING = /^(Claude responded|ChatGPT said|Gemini said|You said)\s*:?\s*/i;
 
 // ---------- finding messages ----------
 
 function pickAll(list) {
-  for (const sel of list) {
+  for (let i = 0; i < list.length; i++) {
     try {
-      const nodes = Array.from(document.querySelectorAll(sel));
-      if (nodes.length) return { selector: sel, nodes };
-    } catch (e) {}
+      const nodes = Array.from(document.querySelectorAll(list[i]));
+      if (nodes.length) return { selector: list[i], level: i, nodes };
+    } catch (e) { }
   }
-  return { selector: null, nodes: [] };
+  return { selector: null, level: -1, nodes: [] };
 }
 
-let usedSelectors = { user: null, assistant: null };
+let lastMethod = { kind: "none", userSel: null, assistantSel: null, userLevel: -1, assistantLevel: -1 };
+let heuristicParent = null;
+
+const BAD_CHILD_TAGS = new Set([
+  "p", "li", "tr", "td", "th", "span", "code", "pre", "a", "em", "strong", "b", "i",
+  "h1", "h2", "h3", "h4", "h5", "h6", "br", "img", "svg", "button", "script", "style",
+]);
+
+function heuristicRoot() {
+  let best = null, bestH = 0;
+  document.querySelectorAll("*").forEach((el) => {
+    const oy = getComputedStyle(el).overflowY;
+    if ((oy === "auto" || oy === "scroll") && el.scrollHeight > el.clientHeight + 20 && el.scrollHeight > bestH) {
+      best = el;
+      bestH = el.scrollHeight;
+    }
+  });
+  return best || document.querySelector("main") || document.body;
+}
+
+function heuristicKids(p) {
+  return Array.from(p.children).filter(
+    (c) =>
+      !BAD_CHILD_TAGS.has(c.tagName.toLowerCase()) &&
+      c.textContent.trim().length >= CFG_HEUR.minTextLength
+  );
+}
+
+// Last resort: inside the chat area, find the element with the most repeating
+// block children. Those blocks are most likely the messages.
+function findHeuristicParent() {
+  const root = heuristicRoot();
+  let best = null, bestScore = 0;
+  const all = [root, ...root.querySelectorAll("*")];
+  for (const p of all) {
+    if (p.closest("pre, nav, ul, ol, table")) continue;
+    const kids = heuristicKids(p);
+    if (kids.length < CFG_HEUR.minBlocks) continue;
+    if (kids.length > bestScore) { best = p; bestScore = kids.length; }
+  }
+  return best;
+}
 
 function collectElements() {
   const u = pickAll(SELECTORS.userMessage);
   const a = pickAll(SELECTORS.assistantMessage);
-  usedSelectors = { user: u.selector, assistant: a.selector };
 
   let items = [
     ...u.nodes.map((el) => ({ el, role: "user" })),
     ...a.nodes.map((el) => ({ el, role: "assistant" })),
   ];
-  // drop elements nested inside another selected element
-  items = items.filter((x) => !items.some((y) => y !== x && y.el.contains(x.el)));
-  // page order
-  items.sort((x, y) =>
-    x.el.compareDocumentPosition(y.el) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1
-  );
-  return items;
+
+  if (items.length) {
+    lastMethod = {
+      kind: "selectors",
+      userSel: u.selector, assistantSel: a.selector,
+      userLevel: u.level, assistantLevel: a.level,
+    };
+    // drop elements nested inside another selected element
+    items = items.filter((x) => !items.some((y) => y !== x && y.el.contains(x.el)));
+    // page order
+    items.sort((x, y) =>
+      x.el.compareDocumentPosition(y.el) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1
+    );
+    return items;
+  }
+
+  if (CFG_HEUR.enabled) {
+    if (!heuristicParent || !heuristicParent.isConnected) heuristicParent = findHeuristicParent();
+    if (heuristicParent) {
+      lastMethod = { kind: "heuristic", userSel: null, assistantSel: null, userLevel: -1, assistantLevel: -1 };
+      // roles cannot be told apart reliably by shape, so they stay "unknown"
+      return heuristicKids(heuristicParent).map((el) => ({ el, role: "unknown" }));
+    }
+  }
+
+  lastMethod = { kind: "none", userSel: null, assistantSel: null, userLevel: -1, assistantLevel: -1 };
+  return [];
 }
 
 function findScroller(fromEl) {
@@ -104,9 +199,11 @@ function walk(node, depth = 0) {
   switch (tag) {
     case "br": return "\n";
     case "hr": return "\n\n---\n\n";
+    case "img": return ""; // images are noted separately by attachNotes()
     case "h1": case "h2": case "h3": case "h4": case "h5": case "h6": {
       const t = kids().trim();
       // screen-reader heading the page adds to every reply: drop it
+      if (LABEL_HEADING.test(t) && t.replace(LABEL_HEADING, "").length < 3) return "";
       if (/^Claude responded:/i.test(t)) return "";
       return "\n\n" + "#".repeat(Number(tag[1])) + " " + t + "\n\n";
     }
@@ -135,21 +232,70 @@ function walk(node, depth = 0) {
   }
 }
 
-// Lines that are page labels (tool chips), not message content.
-const NOISE_EXACT = new Set([
-  "Recalled memory",
-  "Updated memory",
-  "Used a tool",
-  "Created a file",
-]);
-const NOISE_PATTERN = /^(Read|Ran|Searched|Viewed|Edited|Used) \d+ [a-z]+(, [a-z0-9 ]+)*$/i;
+// ---------- images and documents ----------
+// We do not save the files themselves, only a note that they were there.
+
+function fileNameFrom(text) {
+  const lines = (text || "").split("\n").map((s) => s.trim()).filter(Boolean);
+  const withExt = lines.find((l) => /\.[a-z0-9]{2,5}$/i.test(l));
+  return (withExt || lines[0] || "").slice(0, 80);
+}
+
+function attachNotes(el) {
+  const notes = [];
+  const seen = new Set();
+  const add = (kind, name) => {
+    const line = "[" + kind + " attached" + (name ? ": " + name : "") + "]";
+    if (!seen.has(line)) { seen.add(line); notes.push(line); }
+  };
+
+  try {
+    // 1) attachment tiles (documents, and image thumbnails shown as tiles)
+    let tiles = [];
+    ATTACH.tileSelectors.forEach((sel) => {
+      try { el.querySelectorAll(sel).forEach((t) => tiles.push(t)); } catch (e) { }
+    });
+    tiles = tiles.filter((t) => !tiles.some((o) => o !== t && o.contains(t))); // outermost only
+
+    tiles.forEach((t) => {
+      const name = fileNameFrom(t.innerText || t.textContent);
+      const hasImg = !!t.querySelector("img");
+      if (!name && !hasImg) return;
+      const isImage = IMG_EXT.test(name) || (hasImg && !name);
+      add(isImage ? "Image" : "Document", name);
+    });
+
+    // 2) standalone images that are not part of a tile
+    el.querySelectorAll("img").forEach((img) => {
+      if (tiles.some((t) => t.contains(img))) return;
+      const size = Math.max(
+        img.naturalWidth || 0,
+        img.width || 0,
+        parseInt(img.getAttribute("width") || "0", 10)
+      );
+      if (size && size < ATTACH.minImageSize) return;
+      let name = (img.getAttribute("alt") || "").trim();
+      if (!name) {
+        const src = img.getAttribute("src") || "";
+        if (src && !src.startsWith("data:") && !src.startsWith("blob:")) {
+          try { name = decodeURIComponent(new URL(src, location.href).pathname.split("/").pop()); } catch (e) { }
+        }
+      }
+      add("Image", name.slice(0, 80));
+    });
+  } catch (e) { }
+
+  return notes;
+}
+
+// ---------- cleaning ----------
 
 function stripNoise(s) {
   return s
     .split("\n")
     .filter((l) => {
       const t = l.trim();
-      return !(NOISE_EXACT.has(t) || NOISE_PATTERN.test(t));
+      return !(NOISE_EXACT.has(t) || NOISE_PATTERNS.some((re) => re.test(t)));
     })
     .join("\n");
 }
@@ -162,6 +308,12 @@ function clean(s) {
     .trim();
 }
 
+function messageMd(el) {
+  const notes = attachNotes(el);
+  const body = clean(walk(el));
+  return clean(notes.concat(body ? [body] : []).join("\n\n"));
+}
+
 // ---------- snapshots ----------
 
 function hashKey(role, s) {
@@ -171,14 +323,16 @@ function hashKey(role, s) {
 }
 
 const cache = new WeakMap();
+const emptyEls = new Set(); // elements that were found but had no content
 
 function snapshot() {
   const out = [];
   for (const { el, role } of collectElements()) {
     let md = cache.get(el);
     if (md === undefined) {
-      md = clean(walk(el));
-      cache.set(el, md);
+      md = messageMd(el);
+      if (md) { cache.set(el, md); emptyEls.delete(el); }
+      else { emptyEls.add(el); } // not cached: it may still be loading
     }
     if (md) out.push({ role, md, key: hashKey(role, md) });
   }
@@ -186,11 +340,11 @@ function snapshot() {
 }
 
 // ---------- merging ----------
-// The page only keeps messages near the screen in the DOM (plus the newest
-// one), so every snapshot is a window. We merge each window into the running
-// list by order, matching messages that are already known, so nothing is
-// counted twice and identical messages (like repeated "next") stay separate.
-// Unmatched new messages are placed BEFORE known ones, because we scroll up.
+// The page may keep only messages near the screen in the DOM, so every
+// snapshot can be a window. Each window is lined up against the running list
+// by order, so nothing is counted twice and identical messages (like repeated
+// "next") stay separate. Unmatched messages are placed BEFORE known ones,
+// because we scroll up.
 
 let weakLinks = 0;
 
@@ -216,7 +370,7 @@ function mergeSeq(all, v) {
     } else if (dp[i + 1][j] > dp[i][j + 1]) {
       out.push(all[i]); i++;
     } else {
-      out.push(v[j]); j++; // tie or better on the v side: new (older) message goes first
+      out.push(v[j]); j++;
     }
   }
   while (i < n) out.push(all[i++]);
@@ -233,35 +387,101 @@ function addSnapshot(all) {
   return merged;
 }
 
+// ---------- self-check ----------
+
+function runSanity(all, reachedTop) {
+  const warnings = [];
+
+  if (all.length < CFG_SANITY.minMessages) {
+    warnings.push("Too few messages were captured.");
+  }
+
+  if (lastMethod.kind === "heuristic") {
+    warnings.push(
+      "The normal message selectors found nothing, so a backup method was used. " +
+      "Who wrote each message (you or " + SITE_NAME + ") is unknown and the capture may be inaccurate. " +
+      "The " + SITE_NAME + " page has probably changed."
+    );
+  } else {
+    const u = all.filter((m) => m.role === "user").length;
+    const a = all.filter((m) => m.role === "assistant").length;
+    if (Math.abs(u - a) > CFG_SANITY.maxRoleDifference) {
+      warnings.push(
+        "Your messages (" + u + ") and " + SITE_NAME + "'s replies (" + a + ") are unbalanced. " +
+        "One of the selectors may have stopped matching."
+      );
+    }
+  }
+
+  if (CFG_SANITY.requireReachedTop && !reachedTop) {
+    warnings.push("The scroll did not reach the top of the chat, so older messages may be missing.");
+  }
+  if (emptyEls.size) {
+    warnings.push(emptyEls.size + " message block(s) came out empty and were skipped.");
+  }
+  if (weakLinks > 0) {
+    warnings.push(weakLinks + " scroll step(s) did not overlap with earlier ones, so a message in between may be missing.");
+  }
+  return warnings;
+}
+
 // ---------- diagnostics when nothing matches ----------
 
 function selectorReport() {
   const lines = [];
+  lines.push("site: " + SITE_NAME + " (" + location.hostname + ")");
   for (const key of ["userMessage", "assistantMessage"]) {
     SELECTORS[key].forEach((s) => {
       let n = "invalid";
-      try { n = document.querySelectorAll(s).length; } catch (e) {}
+      try { n = document.querySelectorAll(s).length; } catch (e) { }
       lines.push(key + " " + s + " -> " + n);
     });
   }
-  const counts = {};
-  document.querySelectorAll("[data-testid]").forEach((e) => {
-    const v = e.getAttribute("data-testid");
-    counts[v] = (counts[v] || 0) + 1;
+
+  // attribute values that repeat on the page: likely message markers
+  const attrs = ["data-testid", "data-message-author-role", "role", "data-is-streaming"];
+  attrs.forEach((attr) => {
+    const counts = {};
+    document.querySelectorAll("[" + attr + "]").forEach((e) => {
+      const v = e.getAttribute(attr);
+      counts[v] = (counts[v] || 0) + 1;
+    });
+    const top = Object.entries(counts)
+      .filter(([, n]) => n >= 2)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 8)
+      .map(([v, n]) => v + " x" + n);
+    if (top.length) lines.push("repeated " + attr + ": " + top.join(", "));
   });
-  const top = Object.entries(counts)
+
+  // custom page tags that repeat (for example <user-query> style elements)
+  const tagCounts = {};
+  document.querySelectorAll("*").forEach((e) => {
+    const t = e.tagName.toLowerCase();
+    if (t.includes("-")) tagCounts[t] = (tagCounts[t] || 0) + 1;
+  });
+  const tags = Object.entries(tagCounts)
     .filter(([, n]) => n >= 2)
     .sort((a, b) => b[1] - a[1])
     .slice(0, 10)
-    .map(([v, n]) => v + " x" + n);
-  lines.push("repeated data-testid: " + (top.join(", ") || "none"));
+    .map(([t, n]) => t + " x" + n);
+  if (tags.length) lines.push("repeated custom tags: " + tags.join(", "));
+
+  lines.push("backup method: " + (CFG_HEUR.enabled ? "tried, found nothing" : "disabled"));
   return lines.join(" | ");
 }
 
 // ---------- main ----------
 
 async function readChat() {
+  if (typeof SITE === "undefined" || !SITE.id) {
+    return { error: "This site is not supported yet (" + location.hostname + ")." };
+  }
+
   progress("Finding messages...");
+  heuristicParent = null;
+  emptyEls.clear();
+
   const first = collectElements();
   if (!first.length) {
     return { error: "No messages matched. " + selectorReport() };
@@ -279,6 +499,7 @@ async function readChat() {
 
   let steps = 0;
   let stable = 0;
+  let reachedTop = false;
   let lastHeight = scroller.scrollHeight;
   let lastCount = all.length;
 
@@ -299,26 +520,58 @@ async function readChat() {
       else stable = 0;
       lastHeight = h;
       lastCount = all.length;
-      if (stable >= 2) break;
+      if (stable >= 2) { reachedTop = true; break; }
     }
   }
 
   scroller.scrollTop = scroller.scrollHeight; // put the user back at the bottom
 
-  const title = document.title.replace(/\s*[-–|]\s*Claude\s*$/i, "").trim() || "Claude chat";
+  const warnings = runSanity(all, reachedTop);
+
+  let title = document.title || "";
+  try {
+    if (SITE.titleCleanup) title = title.replace(new RegExp(SITE.titleCleanup, "i"), "");
+  } catch (e) { }
+  title = title.trim() || SITE.defaultTitle || "AI chat";
+
   const userCount = all.filter((m) => m.role === "user").length;
+  const aiCount = all.filter((m) => m.role === "assistant").length;
+  const attachCount = all.reduce(
+    (n, m) => n + (m.md.match(/^\[(Image|Document) attached/gm) || []).length, 0
+  );
+
+  const debug =
+    "site=" + SITE.id + " (" + location.hostname + ")" +
+    "; method=" + lastMethod.kind +
+    "; userSelector=" + lastMethod.userSel + " (level " + lastMethod.userLevel + ")" +
+    "; assistantSelector=" + lastMethod.assistantSel + " (level " + lastMethod.assistantLevel + ")" +
+    "; messages=" + all.length + "; you=" + userCount + "; assistant=" + aiCount +
+    "; scrollSteps=" + steps + "; reachedTop=" + reachedTop +
+    "; weakLinks=" + weakLinks + "; emptyBlocks=" + emptyEls.size +
+    "; attachmentNotes=" + attachCount;
+
+  const countLine =
+    lastMethod.kind === "heuristic"
+      ? all.length + " (roles unknown)"
+      : all.length + " (" + userCount + " from you, " + aiCount + " from " + SITE_NAME + ")";
+  const roleName = (r) => (r === "user" ? "You" : r === "assistant" ? SITE_NAME : "Message");
 
   let md = "# " + title + "\n\n";
-  md += "- Source: Claude (claude.ai)\n";
+  md += "- Source: " + SITE_NAME + " (" + location.hostname + ")\n";
   md += "- URL: " + location.href + "\n";
   md += "- Captured: " + new Date().toISOString() + "\n";
-  md += "- Messages: " + all.length + " (" + userCount + " from you, " + (all.length - userCount) + " from Claude)\n\n---\n\n";
-  md += all.map((m) => "## " + (m.role === "user" ? "You" : "Claude") + "\n\n" + m.md).join("\n\n");
-  md += "\n\n<!-- DomScrap debug: userSelector=" + usedSelectors.user +
-        "; assistantSelector=" + usedSelectors.assistant +
-        "; scrollSteps=" + steps + "; weakLinks=" + weakLinks + " -->\n";
+  md += "- Messages: " + countLine + "\n";
+  if (warnings.length) {
+    md += "- Capture warnings:\n" + warnings.map((w) => "  - " + w).join("\n") + "\n";
+  }
+  md += "\n---\n\n";
+  md += all.map((m) => "## " + roleName(m.role) + "\n\n" + m.md).join("\n\n");
+  md += "\n\n<!-- DomScrap debug: " + debug + " -->\n";
 
-  return { markdown: md, title, count: all.length };
+  return {
+    markdown: md, title, count: all.length, warnings,
+    method: lastMethod.kind, debug, site: SITE_NAME,
+  };
 }
 
 chrome.runtime.onMessage.addListener((msg, _sender, send) => {
