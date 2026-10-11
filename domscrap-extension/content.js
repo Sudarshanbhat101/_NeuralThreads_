@@ -432,8 +432,26 @@ function selectorReport() {
   const norm = (v) =>
     String(v)
       .replace(/[0-9a-f]{8}-[0-9a-f-]{20,}/gi, "UUID")
-      .replace(/\d+/g, "N")
-      .slice(0, 60);
+      .replace(/\d+/g, "N");
+
+  // opening tag with its attributes only. Never includes message text.
+  const tagInfo = (el) => {
+    let s = "<" + el.tagName.toLowerCase();
+    Array.from(el.attributes).forEach((a) => {
+      if (a.name === "style" || a.name === "href" || a.name === "src") return;
+      const v = a.name === "class" ? a.value.slice(0, 90) : norm(a.value).slice(0, 40);
+      s += " " + a.name + '="' + v + '"';
+    });
+    return s + ">";
+  };
+
+  const chain = (el, max) => {
+    const out = [];
+    for (let e = el; e && e !== document.body && out.length < max; e = e.parentElement) {
+      out.push(tagInfo(e));
+    }
+    return out.join(" < ");
+  };
 
   lines.push("site: " + SITE_NAME + " (" + location.hostname + ")");
   lines.push("path: " + location.pathname.replace(/[0-9a-f]{8}-[0-9a-f-]{20,}/gi, "UUID"));
@@ -446,53 +464,37 @@ function selectorReport() {
     });
   }
 
-  // attribute values on the page, with numbers/ids folded together so that
-  // unique values (like turn numbers) still show up. No filter on count.
-  const attrs = [
-    "data-testid", "data-message-author-role", "data-message-id",
-    "data-turn", "data-turn-id", "role", "aria-label",
-  ];
-  attrs.forEach((attr) => {
-    const counts = {};
-    document.querySelectorAll("[" + attr + "]").forEach((e) => {
-      const v = norm(e.getAttribute(attr));
-      counts[v] = (counts[v] || 0) + 1;
-    });
-    const top = Object.entries(counts)
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 12)
-      .map(([v, n]) => v + " x" + n);
-    if (top.length) lines.push(attr + ": " + top.join(", "));
-  });
+  // the <section> and <main> elements
+  Array.from(document.querySelectorAll("section")).slice(0, 6)
+    .forEach((el, i) => lines.push("section " + i + ": " + tagInfo(el)));
+  Array.from(document.querySelectorAll("main")).slice(0, 2)
+    .forEach((el, i) => lines.push("main " + i + ": " + tagInfo(el)));
 
-  // structural tags
-  const tagCounts = {};
-  document.querySelectorAll("article, section, main, nav, aside, li").forEach((e) => {
-    const t = e.tagName.toLowerCase();
-    tagCounts[t] = (tagCounts[t] || 0) + 1;
+  // the biggest scrollable areas (to check we scroll the chat, not the sidebar)
+  const scrollables = [];
+  document.querySelectorAll("*").forEach((el) => {
+    const oy = getComputedStyle(el).overflowY;
+    if ((oy === "auto" || oy === "scroll") && el.scrollHeight > el.clientHeight + 20) {
+      scrollables.push(el);
+    }
   });
-  lines.push("structural tags: " + (Object.entries(tagCounts).map(([t, n]) => t + " x" + n).join(", ") || "none"));
+  scrollables.sort((a, b) => b.scrollHeight - a.scrollHeight);
+  scrollables.slice(0, 3).forEach((el, i) =>
+    lines.push("scrollable " + i + " (height " + el.scrollHeight + "): " + tagInfo(el))
+  );
 
-  // custom tags (names with a dash)
-  const custom = {};
-  document.querySelectorAll("*").forEach((e) => {
-    const t = e.tagName.toLowerCase();
-    if (t.includes("-")) custom[t] = (custom[t] || 0) + 1;
+  // parent chain above the first and the last Copy button
+  const copies = Array.from(document.querySelectorAll('[aria-label="Copy"]'));
+  if (copies.length) {
+    lines.push("copy-first chain: " + chain(copies[0], 9));
+    lines.push("copy-last chain: " + chain(copies[copies.length - 1], 9));
+  }
+
+  // anything that looks like a message action button
+  ["Edit message", "Good response", "Bad response", "Read aloud"].forEach((label) => {
+    const el = document.querySelector('[aria-label="' + label + '"]');
+    if (el) lines.push('"' + label + '" chain: ' + chain(el, 9));
   });
-  const customTop = Object.entries(custom).sort((a, b) => b[1] - a[1]).slice(0, 10)
-    .map(([t, n]) => t + " x" + n);
-  if (customTop.length) lines.push("custom tags: " + customTop.join(", "));
-
-  // opening tags only (attributes, no text) of the first few <article>
-  // elements and of any element carrying an author-role marker
-  const samples = [];
-  const grab = (el) => {
-    const html = el.cloneNode(false).outerHTML;
-    samples.push(html.slice(0, html.indexOf(">") + 1).slice(0, 240));
-  };
-  Array.from(document.querySelectorAll("article")).slice(0, 3).forEach(grab);
-  Array.from(document.querySelectorAll("[data-message-author-role]")).slice(0, 2).forEach(grab);
-  if (samples.length) lines.push("sample tags: " + samples.join(" ## "));
 
   lines.push("backup method: " + (CFG_HEUR.enabled ? "tried, found nothing" : "disabled"));
   return lines.join(" | ");
