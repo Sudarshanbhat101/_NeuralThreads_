@@ -570,18 +570,25 @@ function describeEl(el) {
 }
 
 // Move the chat up by one step. Tries several methods because sites differ.
-async function scrollUpStep(scroller, topEl) {
+function isAtTop(s, reversed) {
+  const max = s.scrollHeight - s.clientHeight;
+  if (max <= 2) return true; // nothing to scroll
+  return reversed ? s.scrollTop <= -(max - 2) : s.scrollTop <= 1;
+}
+
+// Move the chat up by one step. Tries several methods because sites differ.
+async function scrollUpStep(scroller, topEl, reversed) {
   const before = scroller.scrollTop;
-  const target = Math.max(0, before - Math.max(200, Math.floor(scroller.clientHeight * 0.5)));
+  const step = Math.max(200, Math.floor(scroller.clientHeight * 0.5));
 
-  scroller.scrollTop = target;
+  try { scroller.scrollBy({ top: -step, behavior: "instant" }); } catch (e) {}
   await sleep(300);
-  if (Math.abs(scroller.scrollTop - before) > 1) return { method: "scrollTop", moved: true };
-  if (before <= 1) return { method: "atTop", moved: false };
+  if (Math.abs(scroller.scrollTop - before) > 1) return { method: "scrollBy", moved: true };
+  if (isAtTop(scroller, reversed)) return { method: "atTop", moved: false };
 
-  try { scroller.scrollTo({ top: target, behavior: "instant" }); } catch (e) {}
+  scroller.scrollTop = before - step;
   await sleep(250);
-  if (Math.abs(scroller.scrollTop - before) > 1) return { method: "scrollTo", moved: true };
+  if (Math.abs(scroller.scrollTop - before) > 1) return { method: "scrollTop", moved: true };
 
   if (topEl && topEl.isConnected) {
     const r0 = topEl.getBoundingClientRect().top;
@@ -616,8 +623,13 @@ async function readChat() {
   weakLinks = 0;
 
   // start from the bottom so the newest messages are captured first
-  scroller.scrollTop = scroller.scrollHeight;
+  scroller.scrollBy({ top: 1e9, behavior: "instant" });
   await sleep(1200);
+  let reversed = false;
+  {
+    const mx = scroller.scrollHeight - scroller.clientHeight;
+    if (mx > 100 && Math.abs(scroller.scrollTop) < 5) reversed = true;
+  }
 
   let all = addSnapshot([]);
   weakLinks = 0;
@@ -648,13 +660,13 @@ async function readChat() {
       }
     }
 
-    const r = await scrollUpStep(scroller, topEl);
+    const r = await scrollUpStep(scroller, topEl, reversed);
     methods[r.method] = (methods[r.method] || 0) + 1;
     all = addSnapshot(all);
 
     if (steps % 5 === 0) progress("Loading conversation... " + all.length + " messages found");
 
-    if (scroller.scrollTop <= 1) {
+    if (isAtTop(scroller, reversed)) {
       // at the top: wait for older messages to load, then see if anything changed
       stuck = 0;
       await sleep(1500);
@@ -686,9 +698,14 @@ async function readChat() {
   }
 
   const scrollerEnd = describeEl(scroller);
-  scroller.scrollTop = scroller.scrollHeight; // put the user back at the bottom
+  scroller.scrollBy({ top: 1e9, behavior: "instant" }); // put the user back at the bottom
 
   const warnings = runSanity(all, reachedTop);
+
+  const movedCount = steps - (methods.atTop || 0) - (methods.none || 0);
+  if (movedCount === 0 && scroller.scrollHeight > scroller.clientHeight * 3) {
+    warnings.push("The chat is much taller than the screen but the scroll never moved, so older messages are probably missing.");
+  }
 
   let title = document.title || "";
   try {
@@ -708,7 +725,7 @@ async function readChat() {
     "; userSelector=" + lastMethod.userSel + " (level " + lastMethod.userLevel + ")" +
     "; assistantSelector=" + lastMethod.assistantSel + " (level " + lastMethod.assistantLevel + ")" +
     "; messages=" + all.length + "; you=" + userCount + "; assistant=" + aiCount +
-    "; scrollSteps=" + steps + "; reachedTop=" + reachedTop +
+    "; scrollSteps=" + steps + "; reachedTop=" + reachedTop + "; reversed=" + reversed +
     "; scrollMethods=" + JSON.stringify(methods) + "; scrollerSwitches=" + switched +
     "; scrollerStart=" + scrollerStart + "; scrollerEnd=" + scrollerEnd +
     "; weakLinks=" + weakLinks + "; emptyBlocks=" + emptyEls.size +
