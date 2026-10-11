@@ -47,22 +47,26 @@ const SITES = {
     defaultTitle: "ChatGPT chat",
     selectors: {
       userMessage: [
-        '[data-message-author-role="user"]',        // GUESS (most confident)
-        'article [data-testid*="user"]',            // GUESS
+        '[data-chatgpt-search-unit-key$=":user"]',
+        '[class*="group/user-message"]',
       ],
       assistantMessage: [
-        '[data-message-author-role="assistant"]',   // GUESS (most confident)
-        'article [data-testid*="assistant"]',       // GUESS
+        '[data-markdown-text-style="assistant-message"]',
+        "[data-chatgpt-selection-message-id]",
       ],
       ignore: [
         "button",
         "svg",
         "[aria-hidden='true']",
-        ".sr-only",                                  // GUESS: screen-reader labels
+        '[data-markdown-copy="exclude"]',
+        ".sr-only",
         "style",
         "script",
       ],
-      scroller: [],
+      scroller: [
+        "[data-app-action-timeline-scroll]",
+        '[aria-label="Conversation"]',
+      ],
     },
     noise: {
       exact: ["ChatGPT said:", "You said:", "Searching the web", "Searched the web"],

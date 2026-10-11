@@ -98,9 +98,60 @@ function findHeuristicParent() {
   return best;
 }
 
+// ---------- only look at the chat the user is actually viewing ----------
+// Some sites (ChatGPT) keep chats you opened earlier on the page, hidden.
+// These helpers make sure we only read what is visible.
+
+function isVisible(el) {
+  if (!el || !el.isConnected) return false;
+  if (el.getClientRects().length === 0) return false; // display:none and similar
+  const st = getComputedStyle(el);
+  if (st.visibility === "hidden" || st.display === "none") return false;
+  if (el.closest("[hidden], [inert]")) return false;
+  return true;
+}
+
+function viewportArea(el) {
+  const r = el.getBoundingClientRect();
+  const w = Math.max(0, Math.min(r.right, window.innerWidth) - Math.max(r.left, 0));
+  const h = Math.max(0, Math.min(r.bottom, window.innerHeight) - Math.max(r.top, 0));
+  return w * h;
+}
+
+// The scroll area of the chat being viewed, if the site's section names one.
+// If several match (old hidden chats), the one most visible on screen wins.
+function getScope() {
+  const list = (SELECTORS.scroller || []);
+  for (const sel of list) {
+    let nodes = [];
+    try { nodes = Array.from(document.querySelectorAll(sel)); } catch (e) {}
+    nodes = nodes.filter(isVisible).filter((n) => viewportArea(n) > 0);
+    if (nodes.length) {
+      nodes.sort((a, b) => viewportArea(b) - viewportArea(a));
+      return nodes[0];
+    }
+  }
+  return null;
+}
+
+// Like pickAll, but keeps only visible elements inside the scope.
+// If that leaves nothing, falls back to the unfiltered result so that
+// sites that already work (Claude, Gemini) cannot get worse.
+function pickScoped(list, scope) {
+  for (let i = 0; i < list.length; i++) {
+    let nodes = [];
+    try { nodes = Array.from(document.querySelectorAll(list[i])); } catch (e) {}
+    nodes = nodes.filter(isVisible);
+    if (scope) nodes = nodes.filter((n) => scope.contains(n));
+    if (nodes.length) return { selector: list[i], level: i, nodes };
+  }
+  return pickAll(list);
+}
+
 function collectElements() {
-  const u = pickAll(SELECTORS.userMessage);
-  const a = pickAll(SELECTORS.assistantMessage);
+  const scope = getScope();
+  const u = pickScoped(SELECTORS.userMessage, scope);
+  const a = pickScoped(SELECTORS.assistantMessage, scope);
 
   let items = [
     ...u.nodes.map((el) => ({ el, role: "user" })),
@@ -136,8 +187,8 @@ function collectElements() {
 }
 
 function findScroller(fromEl) {
-  const custom = pickAll(SELECTORS.scroller).nodes[0];
-  if (custom) return custom;
+  const scoped = getScope();
+  if (scoped) return scoped;
   for (let el = fromEl.parentElement; el && el !== document.body; el = el.parentElement) {
     const oy = getComputedStyle(el).overflowY;
     if ((oy === "auto" || oy === "scroll") && el.scrollHeight > el.clientHeight + 20) return el;
