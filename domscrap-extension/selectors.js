@@ -123,14 +123,14 @@ const SITE_ID = detectSiteId();
 const SITE = SITE_ID
   ? Object.assign({ id: SITE_ID }, SITES[SITE_ID])
   : {
-      id: null,
-      name: "Unsupported site",
-      hosts: [],
-      titleCleanup: "",
-      defaultTitle: "AI chat",
-      selectors: { userMessage: [], assistantMessage: [], ignore: ["button", "svg", "style", "script"], scroller: [] },
-      noise: { exact: [], patterns: [] },
-    };
+    id: null,
+    name: "Unsupported site",
+    hosts: [],
+    titleCleanup: "",
+    defaultTitle: "AI chat",
+    selectors: { userMessage: [], assistantMessage: [], ignore: ["button", "svg", "style", "script"], scroller: [] },
+    noise: { exact: [], patterns: [] },
+  };
 
 // These two names are what content.js already reads, so it keeps working
 // without changes: they now point at the current site's section.
@@ -144,7 +144,7 @@ const NOISE = SITE.noise;
 // It looks for blocks that repeat inside the chat area and treats them as
 // messages. Less accurate, so the popup warns when it is used.
 const HEURISTIC = {
-  enabled: true,
+  enabled: false,
   minBlocks: 2,        // need at least this many repeating blocks
   minTextLength: 1,    // ignore blocks with less text than this
 };
